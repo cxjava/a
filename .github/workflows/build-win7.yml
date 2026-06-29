@@ -1,0 +1,162 @@
+name: Build Hysteria2 for Windows 7
+
+on:
+  workflow_dispatch:
+    inputs:
+      hysteria_tag:
+        description: "可选：手动指定 Hysteria tag/ref（如 app/v2.9.3）。留空 = 自动取最新 Release"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "win7-*"
+
+jobs:
+  # 解析两个上游仓库的"最新版本"信息，下游 build job 都依赖这里的输出
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      hysteria_tag: ${{ steps.resolve.outputs.hysteria_tag }}
+      go_legacy_version: ${{ steps.resolve.outputs.go_legacy_version }}
+      go_legacy_sha256: ${{ steps.resolve.outputs.go_legacy_sha256 }}
+      go_legacy_url: ${{ steps.resolve.outputs.go_legacy_url }}
+    steps:
+      - name: Resolve latest versions
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_HYSTERIA_TAG: ${{ github.event.inputs.hysteria_tag }}
+        run: |
+          set -e
+          AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
+
+          # ---------- Hysteria：取最新 Release tag（除非手动指定） ----------
+          if [ -n "$INPUT_HYSTERIA_TAG" ]; then
+            HYSTERIA_TAG="$INPUT_HYSTERIA_TAG"
+          else
+            HYSTERIA_TAG=$(curl -fsSL "${AUTH[@]}" \
+              https://api.github.com/repos/apernet/hysteria/releases/latest | jq -r '.tag_name')
+          fi
+          if [ -z "$HYSTERIA_TAG" ] || [ "$HYSTERIA_TAG" = "null" ]; then
+            echo "::error::无法解析 Hysteria 最新 tag"; exit 1
+          fi
+          echo "Hysteria tag: $HYSTERIA_TAG"
+          echo "hysteria_tag=$HYSTERIA_TAG" >> "$GITHUB_OUTPUT"
+
+          # ---------- go-legacy-win7：取最新 Release 的 linux_amd64 包 + sha256 ----------
+          RELEASE_JSON=$(curl -fsSL "${AUTH[@]}" \
+            https://api.github.com/repos/thongtech/go-legacy-win7/releases/latest)
+
+          GO_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          GO_VERSION="${GO_TAG#v}"
+          GO_URL=$(echo "$RELEASE_JSON" | jq -r \
+            '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .browser_download_url')
+          # sha256 表格写在 release body（README 那张表的来源），从对应那一行里抠出 64 位 hex
+          GO_SHA256=$(echo "$RELEASE_JSON" | jq -r '.body' \
+            | grep -F "linux_amd64.tar.gz" | grep -oE '[a-f0-9]{64}' | head -n1)
+
+          if [ -z "$GO_URL" ] || [ "$GO_URL" = "null" ] || [ -z "$GO_SHA256" ]; then
+            echo "::error::无法解析 go-legacy-win7 最新版本/下载地址/sha256"
+            echo "$RELEASE_JSON" | jq -r '.body' | head -n 20
+            exit 1
+          fi
+
+          echo "go-legacy-win7 version: $GO_VERSION"
+          echo "go-legacy-win7 url:     $GO_URL"
+          echo "go-legacy-win7 sha256:  $GO_SHA256"
+
+          echo "go_legacy_version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "go_legacy_sha256=$GO_SHA256" >> "$GITHUB_OUTPUT"
+          echo "go_legacy_url=$GO_URL" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: ["386", "amd64"]
+    env:
+      GO_LEGACY_VERSION: ${{ needs.resolve.outputs.go_legacy_version }}
+      GO_LEGACY_SHA256: ${{ needs.resolve.outputs.go_legacy_sha256 }}
+      GO_LEGACY_URL: ${{ needs.resolve.outputs.go_legacy_url }}
+      HYSTERIA_TAG: ${{ needs.resolve.outputs.hysteria_tag }}
+      HYSTERIA_REPO: "https://github.com/apernet/hysteria.git"
+    steps:
+      - name: Cache go-legacy-win7 toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/go-legacy-win7
+          key: go-legacy-win7-${{ env.GO_LEGACY_VERSION }}-linux_amd64
+
+      - name: Download & verify go-legacy-win7 toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o toolchain.tar.gz "$GO_LEGACY_URL"
+          echo "${GO_LEGACY_SHA256}  toolchain.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local -xzf toolchain.tar.gz
+
+      - name: Export GOROOT/PATH
+        run: |
+          echo "/usr/local/go-legacy-win7/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=/usr/local/go-legacy-win7" >> "$GITHUB_ENV"
+
+      - name: Go version
+        run: go version
+
+      - name: Clone Hysteria source
+        run: |
+          set -e
+          git clone "$HYSTERIA_REPO" hysteria
+          cd hysteria
+          git fetch --tags
+          git checkout "$HYSTERIA_TAG"
+          git describe --tags --always > ../BUILD_VERSION.txt
+          echo "version: $(cat ../BUILD_VERSION.txt)"
+
+      - name: Cross-compile windows/${{ matrix.goarch }}
+        working-directory: hysteria
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -o "../hysteria-win7-${{ matrix.goarch }}.exe" ./app
+
+      - name: Inspect artifact
+        run: |
+          file "hysteria-win7-${{ matrix.goarch }}.exe"
+          ls -lh "hysteria-win7-${{ matrix.goarch }}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hysteria-win7-${{ matrix.goarch }}
+          path: |
+            hysteria-win7-${{ matrix.goarch }}.exe
+            BUILD_VERSION.txt
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/win7-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p out
+          find dist -type f \( -name "*.exe" -o -name "BUILD_VERSION.txt" \) -exec cp -f {} out/ \;
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
