@@ -2,14 +2,9 @@ name: Build Hysteria2 for Windows 7
 
 on:
   workflow_dispatch:
-    inputs:
-      hysteria_tag:
-        description: "可选：手动指定 Hysteria tag/ref（如 app/v2.9.3）。留空 = 自动取最新 Release"
-        required: false
-        default: ""
 
 jobs:
-  # 解析两个上游仓库的"最新版本"信息，下游 build job 都依赖这里的输出
+  # 解析两个上游仓库的"最新版本"信息，下游 job 都依赖这里的输出
   resolve:
     runs-on: ubuntu-latest
     outputs:
@@ -22,18 +17,13 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_HYSTERIA_TAG: ${{ github.event.inputs.hysteria_tag }}
         run: |
           set -e
           AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
 
-          # ---------- Hysteria：取最新 Release tag（除非手动指定） ----------
-          if [ -n "$INPUT_HYSTERIA_TAG" ]; then
-            HYSTERIA_TAG="$INPUT_HYSTERIA_TAG"
-          else
-            HYSTERIA_TAG=$(curl -fsSL "${AUTH[@]}" \
-              https://api.github.com/repos/apernet/hysteria/releases/latest | jq -r '.tag_name')
-          fi
+          # ---------- Hysteria：取最新 Release tag ----------
+          HYSTERIA_TAG=$(curl -fsSL "${AUTH[@]}" \
+            https://api.github.com/repos/apernet/hysteria/releases/latest | jq -r '.tag_name')
           if [ -z "$HYSTERIA_TAG" ] || [ "$HYSTERIA_TAG" = "null" ]; then
             echo "::error::无法解析 Hysteria 最新 tag"; exit 1
           fi
@@ -48,7 +38,7 @@ jobs:
           GO_VERSION="${GO_TAG#v}"
           GO_URL=$(echo "$RELEASE_JSON" | jq -r \
             '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .browser_download_url')
-          # sha256 表格写在 release body（README 那张表的来源），从对应那一行里抠出 64 位 hex
+          # sha256 表写在 release body 里（README 那张表就是从这抄出来的），抓对应那一行的 64 位 hex
           GO_SHA256=$(echo "$RELEASE_JSON" | jq -r '.body' \
             | grep -F "linux_amd64.tar.gz" | grep -oE '[a-f0-9]{64}' | head -n1)
 
@@ -79,12 +69,15 @@ jobs:
       GO_LEGACY_URL: ${{ needs.resolve.outputs.go_legacy_url }}
       HYSTERIA_TAG: ${{ needs.resolve.outputs.hysteria_tag }}
       HYSTERIA_REPO: "https://github.com/apernet/hysteria.git"
+      GOROOT_DIR: ${{ runner.temp }}/go-legacy-win7
     steps:
+      # 缓存路径必须是 runner 用户自己有权限的目录，不能是 /usr/local（root 拥有）
+      # 否则 actions/cache 还原时用非 root 身份跑 tar 解压会因权限不足报 exit code 2
       - name: Cache go-legacy-win7 toolchain
         id: cache-toolchain
         uses: actions/cache@v6
         with:
-          path: /usr/local/go-legacy-win7
+          path: ${{ runner.temp }}/go-legacy-win7
           key: go-legacy-win7-${{ env.GO_LEGACY_VERSION }}-linux_amd64
 
       - name: Download & verify go-legacy-win7 toolchain
@@ -93,12 +86,12 @@ jobs:
           set -e
           curl -fsSL -o toolchain.tar.gz "$GO_LEGACY_URL"
           echo "${GO_LEGACY_SHA256}  toolchain.tar.gz" | sha256sum -c -
-          sudo tar -C /usr/local -xzf toolchain.tar.gz
+          tar -C "${{ runner.temp }}" -xzf toolchain.tar.gz
 
       - name: Export GOROOT/PATH
         run: |
-          echo "/usr/local/go-legacy-win7/bin" >> "$GITHUB_PATH"
-          echo "GOROOT=/usr/local/go-legacy-win7" >> "$GITHUB_ENV"
+          echo "$GOROOT_DIR/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$GOROOT_DIR" >> "$GITHUB_ENV"
 
       - name: Go version
         run: go version
@@ -136,7 +129,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,9 +143,28 @@ jobs:
         run: |
           mkdir -p out
           find dist -type f \( -name "*.exe" -o -name "BUILD_VERSION.txt" \) -exec cp -f {} out/ \;
+          ls -lh out
 
-      - name: Create release
+      - name: Generate draft tag
+        id: tag
+        run: |
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=build-${TS}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "ts=${TS}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Hysteria win7 build ${{ needs.resolve.outputs.hysteria_tag }} (${{ steps.tag.outputs.ts }} UTC)"
+          target_commitish: ${{ github.sha }}
+          draft: true
           files: out/*
-          generate_release_notes: true
+          body: |
+            自动构建，**草稿状态**，确认无误后请手动点 Publish release。
+
+            - Hysteria 源码 tag: `${{ needs.resolve.outputs.hysteria_tag }}`
+            - go-legacy-win7 版本: `${{ needs.resolve.outputs.go_legacy_version }}`
+            - 构建时间 (UTC): `${{ steps.tag.outputs.ts }}`
+            - 触发方式: `${{ github.event_name }}`
