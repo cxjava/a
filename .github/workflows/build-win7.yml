@@ -7,9 +7,6 @@ on:
         description: "可选：手动指定 Hysteria tag/ref（如 app/v2.9.3）。留空 = 自动取最新 Release"
         required: false
         default: ""
-  push:
-    tags:
-      - "win7-*"
 
 jobs:
   # 解析两个上游仓库的"最新版本"信息，下游 build job 都依赖这里的输出
@@ -85,7 +82,7 @@ jobs:
     steps:
       - name: Cache go-legacy-win7 toolchain
         id: cache-toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /usr/local/go-legacy-win7
           key: go-legacy-win7-${{ env.GO_LEGACY_VERSION }}-linux_amd64
@@ -130,7 +127,7 @@ jobs:
           ls -lh "hysteria-win7-${{ matrix.goarch }}.exe"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hysteria-win7-${{ matrix.goarch }}
           path: |
@@ -140,13 +137,12 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/win7-')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
@@ -156,7 +152,7 @@ jobs:
           find dist -type f \( -name "*.exe" -o -name "BUILD_VERSION.txt" \) -exec cp -f {} out/ \;
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: out/*
           generate_release_notes: true
