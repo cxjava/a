@@ -116,7 +116,7 @@ jobs:
           GOOS: windows
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -o "../hysteria-win7-${{ matrix.goarch }}.exe" ./app
+        run: go build -ldflags="-s -w" -o "../hysteria-win7-${{ matrix.goarch }}.exe" ./app
 
       - name: Inspect artifact
         run: |
