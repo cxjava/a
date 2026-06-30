@@ -69,8 +69,12 @@ jobs:
       GO_LEGACY_URL: ${{ needs.resolve.outputs.go_legacy_url }}
       HYSTERIA_TAG: ${{ needs.resolve.outputs.hysteria_tag }}
       HYSTERIA_REPO: "https://github.com/apernet/hysteria.git"
-      GOROOT_DIR: ${{ runner.temp }}/go-legacy-win7
     steps:
+      # runner context 不能用在 job 级 env: 里，只能用在 step 的 run/env/with 里，
+      # 所以单独用一个 step 把它写进 $GITHUB_ENV，后面的 step 才能当 $GOROOT_DIR 用
+      - name: Resolve toolchain dir
+        run: echo "GOROOT_DIR=${{ runner.temp }}/go-legacy-win7" >> "$GITHUB_ENV"
+
       # 缓存路径必须是 runner 用户自己有权限的目录，不能是 /usr/local（root 拥有）
       # 否则 actions/cache 还原时用非 root 身份跑 tar 解压会因权限不足报 exit code 2
       - name: Cache go-legacy-win7 toolchain
